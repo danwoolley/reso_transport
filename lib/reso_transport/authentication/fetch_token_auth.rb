@@ -27,9 +27,13 @@ module ResoTransport
 
       def authenticate
         response = connection.post(nil, auth_params { |req| @request = req })
-        json = JSON.parse response.body
+        json = parse_token_response(response.body)
 
-        raise AccessDenied.new(request, response, 'token') unless response.success?
+        # Some token servers (e.g. AWS Cognito behind a proxy) report failures
+        # with HTTP 200 and an OAuth error body, so check the body too.
+        if !response.success? || json['error'] || !json['access_token']
+          raise AccessDenied.new(request, response, 'token', reason: token_error_reason(response, json))
+        end
 
         Access.new({
           access_token: json.fetch('access_token'),
@@ -45,6 +49,20 @@ module ResoTransport
       end
 
       private
+
+      def parse_token_response(body)
+        json = JSON.parse(body.to_s)
+        json.is_a?(Hash) ? json : {}
+      rescue JSON::ParserError
+        {}
+      end
+
+      # Prefer the OAuth error fields (RFC 6749 section 5.2) over the HTTP reason phrase
+      def token_error_reason(response, json)
+        reason = [json['error'], json['error_description']].compact.map(&:to_s).reject(&:empty?).join(': ')
+        reason = "no access_token in token response (HTTP #{response.status})" if reason.empty? && response.success?
+        reason.empty? ? response.reason_phrase : reason
+      end
 
       def auth_params
         params = {
